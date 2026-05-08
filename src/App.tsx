@@ -14,6 +14,50 @@ function App() {
   const [headers, setHeaders] = useState<string[]>([]);
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [showMapper, setShowMapper] = useState(false);
+  const [showTxtSettings, setShowTxtSettings] = useState(false);
+
+  const DEFAULT_TXT_SETTINGS = {
+    fecha: { start: 1, length: 8, enabled: true },
+    tipoCbte: { start: 9, length: 2, enabled: true },
+    puntoVenta: { start: 12, length: 4, enabled: true },
+    numero: { start: 16, length: 20, enabled: true },
+    docTipo: { start: 56, length: 2, enabled: true },
+    docNro: { start: 58, length: 11, enabled: true },
+    cliente: { start: 69, length: 30, enabled: true },
+    total: { start: 99, length: 15, enabled: true },
+    noGravado: { start: 114, length: 15, enabled: true },
+    neto: { start: 129, length: 15, enabled: true },
+    alicuotaPos: { start: 144, length: 4, enabled: true },
+    iva: { start: 148, length: 15, enabled: true },
+    exento: { start: 163, length: 15, enabled: true },
+    percepcionIVA: { start: 178, length: 15, enabled: true },
+    percepcionOtrosNac: { start: 193, length: 15, enabled: true },
+    percepcionIIBB: { start: 208, length: 15, enabled: true },
+    percepcionMunic: { start: 223, length: 15, enabled: true },
+    impInternos: { start: 238, length: 15, enabled: true },
+    otrosTributos: { start: 253, length: 15, enabled: true },
+  };
+
+  const [txtSettings, setTxtSettings] = useState(() => {
+    const saved = localStorage.getItem('contabilidadQ_txtSettings');
+    const parsed = saved ? JSON.parse(saved) : {};
+    // Merge with defaults to ensure new fields (like neto/iva) exist even if old settings were saved
+    return { ...DEFAULT_TXT_SETTINGS, ...parsed };
+  });
+
+  useEffect(() => {
+    localStorage.setItem('contabilidadQ_txtSettings', JSON.stringify(txtSettings));
+  }, [txtSettings]);
+
+  const resetToDefault = () => setTxtSettings(DEFAULT_TXT_SETTINGS);
+  
+  const restoreLastSuccessful = () => {
+    const last = localStorage.getItem('contabilidadQ_lastSuccess');
+    if (last) {
+      setTxtSettings(JSON.parse(last));
+      setError(null);
+    }
+  };
 
   const APP_FIELDS = [
     { id: 'fecha', label: 'Fecha' },
@@ -57,82 +101,95 @@ function App() {
   };
 
   const parsePrinterFile = (content: string): SalesRecord[] => {
-    const lines = content.split(/\r?\n/);
+    const cleanContent = content.replace(/^\uFEFF/, '');
+    const lines = cleanContent.split(/\r?\n/);
     const records: SalesRecord[] = [];
     
     for (const line of lines) {
-      if (!line.startsWith('1') || line.length < 240) continue;
+      if (line.length < 100) continue;
       
-      const fechaRaw = line.substring(1, 9);
-      const fecha = `${fechaRaw.substring(0, 4)}-${fechaRaw.substring(4, 6)}-${fechaRaw.substring(6, 8)}`;
-      const tipoRaw = line.substring(9, 12);
-      const tipoCbte = tipoRaw.replace(/[^0-9]/g, '').padStart(3, '0');
-      const puntoVenta = parseInt(line.substring(12, 16));
-      const numero = parseInt(line.substring(16, 36));
-      const docTipo = line.substring(56, 58);
-      const docNro = line.substring(58, 69).trim();
-      const cliente = line.substring(69, 99).trim() || 'CONSUMIDOR FINAL';
+      // Dynamic offset: Find where the 8-digit date (e.g., 20260406) starts
+      const dateMatch = line.match(/20\d{6}/);
+      if (!dateMatch) continue;
       
-      const parseAmount = (s: string) => {
-        const val = parseInt(s);
-        return isNaN(val) ? 0 : val / 100;
+      // The user's "Positions" are usually 1-based.
+      // We'll calculate the base offset based on the date match if the file has a prefix
+      // If the date is at position 1 (index 0), baseOffset is 0.
+      const baseOffset = (dateMatch.index || 0) - (txtSettings.fecha.start - 1);
+      
+      const getField = (setting: { start: number, length: number, enabled: boolean } | undefined) => {
+        if (!setting || !setting.enabled) return "";
+        const start = baseOffset + (setting.start - 1);
+        return line.substring(start, start + setting.length);
       };
+
+      const parseToCents = (s: string) => {
+        const val = parseInt(s.replace(/[^0-9-]/g, ''));
+        return isNaN(val) ? 0 : val;
+      };
+
+      const fechaRaw = getField(txtSettings.fecha);
+      const fecha = `${fechaRaw.substring(0, 4)}-${fechaRaw.substring(4, 6)}-${fechaRaw.substring(6, 8)}`;
+      const tipoRaw = getField(txtSettings.tipoCbte);
+      const tipoCbte = tipoRaw.replace(/[^0-9]/g, '').padStart(3, '0');
+      const puntoVenta = parseInt(getField(txtSettings.puntoVenta)) || 0;
+      const numero = parseInt(getField(txtSettings.numero)) || 0;
+      const docTipo = getField(txtSettings.docTipo).padStart(2, '0');
+      const docNro = getField(txtSettings.docNro).trim();
+      const cliente = getField(txtSettings.cliente).trim() || 'CONSUMIDOR FINAL';
       
-      const total = parseAmount(line.substring(99, 114));
-      const noGravado = parseAmount(line.substring(114, 129));
-      const neto = parseAmount(line.substring(129, 144));
-      const alicPercent = line.substring(144, 148);
-      const iva = parseAmount(line.substring(148, 163));
-      const exento = parseAmount(line.substring(163, 178));
-      const percepcionIVA = parseAmount(line.substring(178, 193));
-      const percepcionIIBB = parseAmount(line.substring(193, 208));
-      const percepcionMunic = parseAmount(line.substring(208, 223));
-      const impInternos = parseAmount(line.substring(223, 238));
-      const otrosTributos = parseAmount(line.substring(238, 253));
+      const totalCents = parseToCents(getField(txtSettings.total));
+      const noGravadoCents = parseToCents(getField(txtSettings.noGravado));
+      const netoCents = parseToCents(getField(txtSettings.neto));
+      const ivaCents = parseToCents(getField(txtSettings.iva));
+      const exentoCents = parseToCents(getField(txtSettings.exento));
+      const percepcionIVACents = parseToCents(getField(txtSettings.percepcionIVA));
+      const percepcionOtrosNacCents = parseToCents(getField(txtSettings.percepcionOtrosNac));
+      const percepcionIIBBCents = parseToCents(getField(txtSettings.percepcionIIBB));
+      const percepcionMunicCents = parseToCents(getField(txtSettings.percepcionMunic));
+      const impInternosCents = parseToCents(getField(txtSettings.impInternos));
+      const otrosTributosCents = parseToCents(getField(txtSettings.otrosTributos));
       
-      // Usually Neto and IVA are calculated if not present, 
-      // but some files have them. If we have them, we use them.
-      // However, for consistency with AFIP Sum, we prioritize:
-      // Neto = Total - IVA - Exento - NoGravado - Tributos
-      
-      // Aliquot mapping
+      const alicPercent = getField(txtSettings.alicuotaPos);
       let alicuota = '5'; // default 21%
-      if (alicPercent === '1050') alicuota = '4';
-      else if (alicPercent === '2700') alicuota = '6';
-      else if (alicPercent === '0000') alicuota = '3';
-      else if (alicPercent === '0500') alicuota = '8';
-      else if (alicPercent === '0250') alicuota = '9';
-
-      // Logical normalization to prevent doubling in AFIP:
-      // If Total = Neto + IVA, then Exento and NoGravado must be 0.
-      // If Total = Exento, then Neto and IVA must be 0.
+      if (alicPercent.startsWith('105')) alicuota = '4';
+      else if (alicPercent.startsWith('270')) alicuota = '6';
+      else if (alicPercent.startsWith('000')) alicuota = '3';
+      else if (alicPercent.startsWith('050')) alicuota = '8';
+      else if (alicPercent.startsWith('025')) alicuota = '9';
       
-      let finalNeto = neto;
-      let finalIva = iva;
-      let finalExento = exento;
-      let finalNoGravado = noGravado;
+      let finalNetoCents = netoCents;
+      let finalIvaCents = ivaCents;
+      let finalExentoCents = exentoCents;
+      let finalNoGravadoCents = noGravadoCents;
+      
+      // Sanity check: In some printer logs, the Total is repeated in tax fields.
+      let cleanPercepIVACents = percepcionIVACents;
+      if (totalCents > 0 && Math.abs(percepcionIVACents - totalCents) < 2) cleanPercepIVACents = 0;
 
-      // If it's all zero but has a total, calculate it
-      if (total > 0 && finalNeto === 0 && finalExento === 0 && finalNoGravado === 0) {
+      // Handle tax-exempt or special cases
+      if (tipoCbte === '011' || alicuota === '3') {
+        const others = finalNoGravadoCents + cleanPercepIVACents + percepcionOtrosNacCents + percepcionIIBBCents + percepcionMunicCents + impInternosCents + otrosTributosCents;
+        finalExentoCents = totalCents - others;
+        finalNetoCents = 0;
+        finalIvaCents = 0;
+      } else if (totalCents > 0 && finalNetoCents === 0 && finalExentoCents === 0 && finalNoGravadoCents === 0) {
         const rate = alicuota === '4' ? 0.105 : alicuota === '6' ? 0.27 : 0.21;
-        if (alicuota !== '3') {
-          finalNeto = Number((total / (1 + rate)).toFixed(2));
-          finalIva = Number((total - finalNeto).toFixed(2));
-        } else {
-          finalExento = total;
+        finalNetoCents = Math.round((totalCents / (1 + rate)));
+        finalIvaCents = totalCents - finalNetoCents;
+      }
+
+      // ARCA CRITICAL: Force mathematical integrity using residual calculation in cents
+      if (totalCents > 0) {
+        if (finalNetoCents > 0 || (finalNetoCents === 0 && finalIvaCents > 0)) {
+          const others = finalIvaCents + finalExentoCents + finalNoGravadoCents + cleanPercepIVACents + percepcionOtrosNacCents + percepcionIIBBCents + percepcionMunicCents + impInternosCents + otrosTributosCents;
+          finalNetoCents = totalCents - others;
+        } else if (finalExentoCents > 0) {
+          const others = finalNetoCents + finalIvaCents + finalNoGravadoCents + cleanPercepIVACents + percepcionOtrosNacCents + percepcionIIBBCents + percepcionMunicCents + impInternosCents + otrosTributosCents;
+          finalExentoCents = totalCents - others;
         }
       }
 
-      // Type 082 / 081 etc handling
-      if (tipoCbte === '082' || tipoCbte === '011') {
-        // C and B to consumers are often reported as all exempt or all neto 0%
-        if (finalNeto > 0 && alicuota === '3') {
-           finalExento = (finalExento || 0) + finalNeto + finalIva;
-           finalNeto = 0;
-           finalIva = 0;
-        }
-      }
-      
       records.push({
         fecha,
         tipoCbte,
@@ -141,23 +198,22 @@ function App() {
         docTipo,
         docNro,
         cliente,
-        total,
-        noGravado: finalNoGravado,
-        percepcionNoCat: 0,
-        exento: finalExento,
-        percepcionIVA,
-        percepcionIIBB,
-        percepcionMunic,
-        impInternos,
-        otrosTributos,
-        neto: finalNeto,
-        iva: finalIva,
+        total: totalCents,
+        noGravado: finalNoGravadoCents,
+        percepcionOtrosNac: percepcionOtrosNacCents,
+        exento: finalExentoCents,
+        percepcionIVA: cleanPercepIVACents,
+        percepcionIIBB: percepcionIIBBCents,
+        percepcionMunic: percepcionMunicCents,
+        impInternos: impInternosCents,
+        otrosTributos: otrosTributosCents,
+        neto: finalNetoCents,
+        iva: finalIvaCents,
         alicuota
       });
     }
     return records;
   };
-
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -169,14 +225,18 @@ function App() {
     reader.onload = (event) => {
       try {
         const isTxt = file.name.toLowerCase().endsWith('.txt');
-        
         if (isTxt) {
           const content = event.target?.result as string;
           const mappedRecords = parsePrinterFile(content);
-          if (mappedRecords.length === 0) {
+          if (mappedRecords.length > 0) {
+            setRecords(mappedRecords);
+            setFileName(file.name);
+            setError(null);
+            // Guardar como última configuración exitosa
+            localStorage.setItem('contabilidadQ_lastSuccess', JSON.stringify(txtSettings));
+          } else {
             throw new Error("No se encontraron registros válidos en el archivo TXT.");
           }
-          setRecords(mappedRecords);
           return;
         }
 
@@ -193,10 +253,10 @@ function App() {
           autoMap(fileHeaders);
           setShowMapper(true);
         } else {
-          throw new Error("El archivo está vacío.");
+          throw new Error("El formato de archivo no es soportado.");
         }
       } catch (err) {
-        setError("Error al procesar el archivo. Asegúrate de que el formato sea correcto.");
+        setError(err instanceof Error ? err.message : "Error al procesar el archivo.");
         console.error(err);
       }
     };
@@ -211,34 +271,30 @@ function App() {
   const applyMapping = () => {
     try {
       const mappedRecords: SalesRecord[] = rawData.map((row, index) => {
-        const total = Number(row[mapping['total']] || 0);
-        let neto = Number(row[mapping['neto']] || 0);
-        let iva = Number(row[mapping['iva']] || 0);
-        let exento = 0;
-        let noGravado = Number(row[mapping['noGravado']] || 0);
+        const totalCents = Math.round(Number(row[mapping['total']] || 0) * 100);
+        let netoCents = Math.round(Number(row[mapping['neto']] || 0) * 100);
+        let ivaCents = Math.round(Number(row[mapping['iva']] || 0) * 100);
+        let exentoCents = 0;
+        let noGravadoCents = Math.round(Number(row[mapping['noGravado']] || 0) * 100);
         const alicuota = String(row[mapping['alicuota']] || '5').replace(/[^0-9]/g, '');
 
-        // Normalization: If it's a Factura C or Alícuota 0, move everything to Neto with 0% or Exento
-        // to avoid duplicating amounts between Neto Gravado and Exento fields.
+        // Logical normalization to prevent doubling in AFIP:
         if (alicuota === '3') {
-          exento = total - noGravado;
-          neto = 0;
-          iva = 0;
-        } else if (neto === 0 && total > 0 && noGravado === 0) {
-          // If Neto is not provided but we have a total, calculate it
+          exentoCents = totalCents - noGravadoCents;
+          netoCents = 0;
+          ivaCents = 0;
+        } else if (netoCents === 0 && totalCents > 0 && noGravadoCents === 0) {
           const rate = alicuota === '4' ? 0.105 : alicuota === '6' ? 0.27 : 0.21;
-          neto = Number((total / (1 + rate)).toFixed(2));
-          iva = Number((total - neto).toFixed(2));
+          netoCents = Math.round(totalCents / (1 + rate));
+          ivaCents = totalCents - netoCents;
         }
 
-        // Final check: Neto + IVA + Exento + NoGravado should not exceed Total
-        // If they do, it's likely because the user mapped the Total to multiple fields.
-        if ((neto + iva + exento + noGravado) > total * 1.01) {
-           // If they are equal to Total individually, prioritize Neto/IVA
-           if (neto + iva >= total * 0.99) {
-             exento = 0;
-             noGravado = 0;
-           }
+        // Final strict normalization to ensure Total = Sum of Parts
+        const currentSum = netoCents + ivaCents + exentoCents + noGravadoCents;
+        if (currentSum !== totalCents) {
+          if (netoCents > 0) netoCents = totalCents - (ivaCents + exentoCents + noGravadoCents);
+          else if (exentoCents > 0) exentoCents = totalCents - (netoCents + ivaCents + noGravadoCents);
+          else if (noGravadoCents > 0) noGravadoCents = totalCents - (netoCents + ivaCents + exentoCents);
         }
 
         return {
@@ -249,17 +305,17 @@ function App() {
           docTipo: String(row[mapping['docTipo']] || '99'),
           docNro: String(row[mapping['docNro']] || '0'),
           cliente: String(row[mapping['cliente']] || 'Consumidor Final'),
-          total: total,
-          noGravado: noGravado,
-          percepcionNoCat: 0,
-          exento: exento,
+          total: totalCents,
+          noGravado: noGravadoCents,
+          exento: exentoCents,
           percepcionIVA: 0,
+          percepcionOtrosNac: 0,
           percepcionIIBB: 0,
           percepcionMunic: 0,
           impInternos: 0,
           otrosTributos: 0,
-          neto: neto,
-          iva: iva,
+          neto: netoCents,
+          iva: ivaCents,
           alicuota: alicuota,
         };
       });
@@ -343,17 +399,98 @@ function App() {
           transition={{ duration: 0.4 }}
         >
           {!records.length && !showMapper ? (
-            <label className="upload-zone">
-              <input type="file" hidden onChange={handleFileUpload} accept=".xlsx, .xls, .csv, .txt" />
-              <div className="flex flex-col items-center">
-                <Upload size={48} color="hsl(var(--primary))" style={{ marginBottom: '1rem' }} />
-                <h3>Haz clic para subir o arrastra tu archivo</h3>
-                <p>Formatos aceptados: Excel (.xlsx, .xls), CSV o Exportación de Impresora (.txt)</p>
-                <div style={{ marginTop: '2rem', fontSize: '0.8rem', color: '#64748b' }}>
-                  Soporte directo para archivos de impresoras fiscales y CITI Ventas.
+            <div className="flex flex-col gap-4 w-full">
+              <label className="upload-zone w-full">
+                <input type="file" hidden onChange={handleFileUpload} accept=".xlsx, .xls, .csv, .txt" />
+                <div className="flex flex-col items-center">
+                  <Upload size={48} color="hsl(var(--primary))" style={{ marginBottom: '1rem' }} />
+                  <h3>Haz clic para subir o arrastra tu archivo</h3>
+                  <p>Excel (.xlsx, .xls), CSV o Exportación de Impresora (.txt)</p>
                 </div>
+              </label>
+
+              <div className="glass-card" style={{ padding: '1.5rem', background: 'rgba(30, 41, 59, 0.4)' }}>
+                <div 
+                  style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+                  onClick={() => setShowTxtSettings(!showTxtSettings)}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', width: '100%' }}>
+                      <FileText size={20} color="hsl(var(--primary))" />
+                      <h4 style={{ margin: 0, flex: 1 }}>Configurar Posiciones TXT</h4>
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <button 
+                          className="btn btn-secondary" 
+                          style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}
+                          onClick={(e) => { e.stopPropagation(); restoreLastSuccessful(); }}
+                        >
+                          Restaurar Última Exitosa
+                        </button>
+                        <button 
+                          className="btn btn-secondary" 
+                          style={{ padding: '0.3rem 0.6rem', fontSize: '0.75rem' }}
+                          onClick={(e) => { e.stopPropagation(); resetToDefault(); }}
+                        >
+                          Valores x Defecto
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>{showTxtSettings ? 'Ocultar' : 'Personalizar'}</span>
+                </div>
+
+                {showTxtSettings && (
+                  <div className="animate-fade-in" style={{ marginTop: '1.5rem' }}>
+                    <p style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: '1rem' }}>
+                      Ajusta las posiciones (Desde) y longitud de cada campo según tu archivo.
+                    </p>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '1rem' }}>
+                      {Object.entries(txtSettings).map(([key, val]) => {
+                        const value = val as { start: number, length: number, enabled: boolean };
+                        return (
+                          <div key={key} style={{ 
+                            background: value.enabled ? 'rgba(15, 23, 42, 0.5)' : 'rgba(15, 23, 42, 0.2)', 
+                            padding: '0.8rem', 
+                            borderRadius: '8px',
+                            border: value.enabled ? '1px solid rgba(255,255,255,0.05)' : '1px solid transparent',
+                            opacity: value.enabled ? 1 : 0.6
+                          }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                              <label style={{ fontSize: '0.75rem', color: value.enabled ? '#94a3b8' : '#64748b', textTransform: 'capitalize' }}>
+                                {key.replace(/([A-Z])/g, ' $1')}
+                              </label>
+                              <input 
+                                type="checkbox" 
+                                checked={value.enabled} 
+                                onChange={(e) => setTxtSettings({...txtSettings, [key]: {...value, enabled: e.target.checked}})}
+                              />
+                            </div>
+                            <div style={{ display: 'flex', gap: '0.4rem' }}>
+                              <input 
+                                type="number" 
+                                disabled={!value.enabled}
+                                title="Desde"
+                                value={value.start} 
+                                onChange={(e) => setTxtSettings({...txtSettings, [key]: {...value, start: parseInt(e.target.value) || 0}})}
+                                style={{ width: '100%', background: 'transparent', border: '1px solid rgba(255,255,255,0.1)', color: 'white', fontSize: '0.8rem', padding: '0.2rem' }}
+                              />
+                              <input 
+                                type="number" 
+                                disabled={!value.enabled}
+                                title="Largo"
+                                value={value.length} 
+                                onChange={(e) => setTxtSettings({...txtSettings, [key]: {...value, length: parseInt(e.target.value) || 0}})}
+                                style={{ width: '100%', background: 'transparent', border: '1px solid rgba(255,255,255,0.1)', color: 'white', fontSize: '0.8rem', padding: '0.2rem' }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
-            </label>
+            </div>
           ) : showMapper ? (
             <div className="animate-fade-in">
               <div style={{ marginBottom: '2rem' }}>
@@ -537,9 +674,11 @@ function App() {
                         <th>Exento</th>
                         <th>No Grav.</th>
                         <th>P. IVA</th>
+                        <th>P. Otros Nac.</th>
                         <th>P. IIBB</th>
+                        <th>P. Munic.</th>
                         <th>Int.</th>
-                        <th>Otros</th>
+                        <th>Otros Trib.</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -550,15 +689,17 @@ function App() {
                           <td>{r.puntoVenta.toString().padStart(5, '0')}-{r.numero.toString().padStart(8, '0')}</td>
                           <td className="truncate" title={r.cliente}>{r.cliente}</td>
                           <td>{r.docNro}</td>
-                          <td>${r.total.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          <td>${r.neto.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          <td>${r.iva.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          <td>${r.exento.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          <td>${r.noGravado.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          <td>${r.percepcionIVA.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          <td>${r.percepcionIIBB.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          <td>${r.impInternos.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-                          <td>${r.otrosTributos.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td>${(r.total / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td>${(r.neto / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td>${(r.iva / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td>${(r.exento / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td>${(r.noGravado / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td>${(r.percepcionIVA / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td>${(r.percepcionOtrosNac / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td>${(r.percepcionIIBB / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td>${(r.percepcionMunic / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td>${(r.impInternos / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                          <td>${(r.otrosTributos / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
                         </tr>
                       ))}
                     </tbody>

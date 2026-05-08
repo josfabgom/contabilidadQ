@@ -17,6 +17,19 @@ export const formatNumber = (value: number, length: number, decimals: number = 2
   return formatted;
 };
 
+// Use this for absolute precision with integer cents
+export const formatCents = (cents: number, length: number): string => {
+  const isNegative = cents < 0;
+  const absoluteValue = Math.abs(cents);
+  let formatted = absoluteValue.toString().padStart(length, '0');
+  
+  if (isNegative) {
+    formatted = '-' + formatted.substring(1);
+  }
+  
+  return formatted;
+};
+
 export const formatDate = (date: Date | string): string => {
   if (typeof date === 'string' && date.includes('-')) {
     const [year, month, day] = date.split('-');
