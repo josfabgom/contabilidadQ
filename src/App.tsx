@@ -17,25 +17,25 @@ function App() {
   const [showTxtSettings, setShowTxtSettings] = useState(false);
 
   const DEFAULT_TXT_SETTINGS = {
-    fecha: { start: 1, length: 8, enabled: true },
-    tipoCbte: { start: 9, length: 2, enabled: true },
-    puntoVenta: { start: 12, length: 4, enabled: true },
-    numero: { start: 16, length: 20, enabled: true },
-    docTipo: { start: 56, length: 2, enabled: true },
-    docNro: { start: 58, length: 11, enabled: true },
-    cliente: { start: 69, length: 30, enabled: true },
-    total: { start: 99, length: 15, enabled: true },
-    noGravado: { start: 114, length: 15, enabled: true },
-    neto: { start: 129, length: 15, enabled: true },
-    alicuotaPos: { start: 144, length: 4, enabled: true },
-    iva: { start: 148, length: 15, enabled: true },
-    exento: { start: 163, length: 15, enabled: true },
-    percepcionIVA: { start: 178, length: 15, enabled: true },
-    percepcionOtrosNac: { start: 193, length: 15, enabled: true },
-    percepcionIIBB: { start: 208, length: 15, enabled: true },
-    percepcionMunic: { start: 223, length: 15, enabled: true },
-    impInternos: { start: 238, length: 15, enabled: true },
-    otrosTributos: { start: 253, length: 15, enabled: true },
+    fecha: { start: 2, length: 8, enabled: true },
+    tipoCbte: { start: 10, length: 2, enabled: true },
+    puntoVenta: { start: 13, length: 4, enabled: true },
+    numero: { start: 17, length: 20, enabled: true },
+    docTipo: { start: 57, length: 2, enabled: true },
+    docNro: { start: 59, length: 11, enabled: true },
+    cliente: { start: 70, length: 30, enabled: true },
+    total: { start: 100, length: 15, enabled: true },
+    noGravado: { start: 115, length: 15, enabled: true },
+    neto: { start: 130, length: 15, enabled: true },
+    alicuotaPos: { start: 145, length: 2, enabled: true },
+    iva: { start: 147, length: 17, enabled: true },
+    exento: { start: 163, length: 15, enabled: false },
+    percepcionIVA: { start: 178, length: 15, enabled: false },
+    percepcionOtrosNac: { start: 193, length: 15, enabled: false },
+    percepcionIIBB: { start: 208, length: 15, enabled: false },
+    percepcionMunic: { start: 223, length: 15, enabled: false },
+    impInternos: { start: 238, length: 15, enabled: false },
+    otrosTributos: { start: 253, length: 15, enabled: false },
   };
 
   const [txtSettings, setTxtSettings] = useState(() => {
@@ -134,7 +134,10 @@ function App() {
       const tipoCbte = tipoRaw.replace(/[^0-9]/g, '').padStart(3, '0');
       const puntoVenta = parseInt(getField(txtSettings.puntoVenta)) || 0;
       const numero = parseInt(getField(txtSettings.numero)) || 0;
-      const docTipo = getField(txtSettings.docTipo).padStart(2, '0');
+      let docTipo = getField(txtSettings.docTipo).replace(/[^0-9]/g, '');
+      if (!docTipo || docTipo === '0' || docTipo === '00') docTipo = '99';
+      docTipo = docTipo.padStart(2, '0');
+      
       const docNro = getField(txtSettings.docNro).trim();
       const cliente = getField(txtSettings.cliente).trim() || 'CONSUMIDOR FINAL';
       
@@ -173,21 +176,34 @@ function App() {
         finalExentoCents = totalCents - others;
         finalNetoCents = 0;
         finalIvaCents = 0;
-      } else if (totalCents > 0 && finalNetoCents === 0 && finalExentoCents === 0 && finalNoGravadoCents === 0) {
-        const rate = alicuota === '4' ? 0.105 : alicuota === '6' ? 0.27 : 0.21;
-        finalNetoCents = Math.round((totalCents / (1 + rate)));
-        finalIvaCents = totalCents - finalNetoCents;
-      }
+      } else {
+        const rate = alicuota === '4' ? 0.105 : alicuota === '6' ? 0.27 : alicuota === '8' ? 0.05 : alicuota === '9' ? 0.025 : 0.21;
+        const others = finalExentoCents + finalNoGravadoCents + cleanPercepIVACents + percepcionOtrosNacCents + percepcionIIBBCents + percepcionMunicCents + impInternosCents + otrosTributosCents;
+        const targetTaxed = totalCents - others;
 
-      // ARCA CRITICAL: Force mathematical integrity using residual calculation in cents
-      if (totalCents > 0) {
-        if (finalNetoCents > 0 || (finalNetoCents === 0 && finalIvaCents > 0)) {
-          const others = finalIvaCents + finalExentoCents + finalNoGravadoCents + cleanPercepIVACents + percepcionOtrosNacCents + percepcionIIBBCents + percepcionMunicCents + impInternosCents + otrosTributosCents;
-          finalNetoCents = totalCents - others;
-        } else if (finalExentoCents > 0) {
-          const others = finalNetoCents + finalIvaCents + finalNoGravadoCents + cleanPercepIVACents + percepcionOtrosNacCents + percepcionIIBBCents + percepcionMunicCents + impInternosCents + otrosTributosCents;
-          finalExentoCents = totalCents - others;
+        // Force mathematical integrity: Neto + round(Neto * Rate) = TaxedTotal
+        let net = Math.round(targetTaxed / (1 + rate));
+        let iva = Math.round(net * rate);
+        
+        // Try to adjust net by 1 cent to see if we can get a perfect match
+        let diff = targetTaxed - (net + iva);
+        if (diff !== 0) {
+          const altNet = net + (diff > 0 ? 1 : -1);
+          const altIva = Math.round(altNet * rate);
+          if (altNet + altIva === targetTaxed) {
+            net = altNet;
+            iva = altIva;
+          }
         }
+        
+        // If still a difference (mathematical gap), absorb it in No Gravado (or Exento)
+        const finalDiff = targetTaxed - (net + iva);
+        if (finalDiff !== 0) {
+          finalNoGravadoCents += finalDiff;
+        }
+
+        finalNetoCents = net;
+        finalIvaCents = iva;
       }
 
       records.push({
@@ -276,25 +292,48 @@ function App() {
         let ivaCents = Math.round(Number(row[mapping['iva']] || 0) * 100);
         let exentoCents = 0;
         let noGravadoCents = Math.round(Number(row[mapping['noGravado']] || 0) * 100);
-        const alicuota = String(row[mapping['alicuota']] || '5').replace(/[^0-9]/g, '');
+        let alicuota = String(row[mapping['alicuota']] || '5').trim().replace('%', '');
+        // Map common human-readable values to AFIP codes
+        if (alicuota === '21' || alicuota === '21.0') alicuota = '5';
+        else if (alicuota === '10.5') alicuota = '4';
+        else if (alicuota === '27' || alicuota === '27.0') alicuota = '6';
+        else if (alicuota === '0' || alicuota === 'Exento') alicuota = '3';
+        else if (alicuota === '5' && alicuota.length === 1) alicuota = '8';
+        else if (alicuota === '2.5') alicuota = '9';
+        else alicuota = alicuota.replace(/[^0-9]/g, ''); // default to digits only if not matched
 
         // Logical normalization to prevent doubling in AFIP:
         if (alicuota === '3') {
           exentoCents = totalCents - noGravadoCents;
           netoCents = 0;
           ivaCents = 0;
-        } else if (netoCents === 0 && totalCents > 0 && noGravadoCents === 0) {
-          const rate = alicuota === '4' ? 0.105 : alicuota === '6' ? 0.27 : 0.21;
-          netoCents = Math.round(totalCents / (1 + rate));
-          ivaCents = totalCents - netoCents;
-        }
+        } else {
+          const rate = alicuota === '4' ? 0.105 : alicuota === '6' ? 0.27 : alicuota === '8' ? 0.05 : alicuota === '9' ? 0.025 : 0.21;
+          const targetTaxed = totalCents - (noGravadoCents + exentoCents);
+          
+          // Re-calculate Net and IVA to ensure round(Net * Rate) = IVA exactly
+          let net = Math.round(targetTaxed / (1 + rate));
+          let iva = Math.round(net * rate);
+          
+          // Try to adjust net by 1 cent to see if we can get a perfect match
+          let diff = targetTaxed - (net + iva);
+          if (diff !== 0) {
+            const altNet = net + (diff > 0 ? 1 : -1);
+            const altIva = Math.round(altNet * rate);
+            if (altNet + altIva === targetTaxed) {
+              net = altNet;
+              iva = altIva;
+            }
+          }
+          
+          // Absorb any impossible cent in No Gravado
+          const finalDiff = targetTaxed - (net + iva);
+          if (finalDiff !== 0) {
+            noGravadoCents += finalDiff;
+          }
 
-        // Final strict normalization to ensure Total = Sum of Parts
-        const currentSum = netoCents + ivaCents + exentoCents + noGravadoCents;
-        if (currentSum !== totalCents) {
-          if (netoCents > 0) netoCents = totalCents - (ivaCents + exentoCents + noGravadoCents);
-          else if (exentoCents > 0) exentoCents = totalCents - (netoCents + ivaCents + noGravadoCents);
-          else if (noGravadoCents > 0) noGravadoCents = totalCents - (netoCents + ivaCents + exentoCents);
+          netoCents = net;
+          ivaCents = iva;
         }
 
         return {
